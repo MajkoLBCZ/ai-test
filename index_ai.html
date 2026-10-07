@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>2. Převodník - Kosti se 2 kotevními body na stranách</title>
+  <!-- Načtení Matter.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background-color: #1a1a1a;
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      gap: 15px;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 500;
+    }
+    #wrapper {
+      position: relative;
+      width: 800px;
+      height: 500px;
+      border: 2px solid #444;
+      border-radius: 8px;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+      background-color: #222;
+      overflow: hidden;
+    }
+    canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+    #drawingCanvas {
+      z-index: 2;
+      cursor: none;
+    }
+    #matterContainer canvas {
+      z-index: 1;
+    }
+    .controls {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    .tools {
+      display: flex;
+      gap: 6px;
+      background: #2a2a2a;
+      padding: 6px;
+      border-radius: 8px;
+      border: 1px solid #444;
+    }
+    button {
+      padding: 8px 14px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #fff;
+      background-color: #3b82f6;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    button:hover { background-color: #2563eb; }
+    button.tool-btn { background-color: #374151; color: #aaa; }
+    button.tool-btn.active { color: #fff; }
+    button.tool-btn[data-type="body"].active { background-color: #3b82f6; }
+    button.tool-btn[data-type="legL"].active { background-color: #10b981; }
+    button.tool-btn[data-type="legR"].active { background-color: #a855f7; }
+    button.tool-btn[data-type="jointFree"].active { background-color: #ef4444; }
+    button.tool-btn[data-type="jointMotor"].active { background-color: #f59e0b; }
+
+    button.secondary { background-color: #4b5563; }
+    button.secondary:hover { background-color: #374151; }
+    #info { font-size: 0.85rem; color: #aaa; }
+  </style>
+</head>
+<body>
+
+  <h1>2. Kosti se dvěma body uchycení na každé straně</h1>
+
+  <div class="tools">
+    <button class="tool-btn active" data-type="body">1. Tělo / Trup</button>
+    <button class="tool-btn" data-type="legL">2. Noha L</button>
+    <button class="tool-btn" data-type="legR">3. Noha P</button>
+    <span style="border-left: 1px solid #555; margin: 0 4px;"></span>
+    <button class="tool-btn" data-type="jointFree">🔴 Volný Kloub</button>
+    <button class="tool-btn" data-type="jointMotor">🟡 Motorický Kloub</button>
+  </div>
+
+  <div id="wrapper">
+    <canvas id="drawingCanvas" width="800" height="500"></canvas>
+    <div id="matterContainer"></div>
+  </div>
+
+  <div class="controls">
+    <button id="clearBtn" class="secondary">Smazat / Reset</button>
+    <button id="convertBtn">Převést na fyzikální tělesa</button>
+  </div>
+
+  <p id="info">Každá kost má 2 kotevní body na každém konci (pro obě strany tloušťky kosti).</p>
+
+  <script>
+    const COLOR_MAP = {
+      body: '#3b82f6',
+      legL: '#10b981',
+      legR: '#a855f7',
+      jointFree: '#ef4444',
+      jointMotor: '#f59e0b'
+    };
+
+    const BONE_THICKNESS = 12; // Tloušťka kosti
+    const SNAP_RADIUS = 20;
+
+    let currentTool = 'body';
+
+    document.querySelectorAll('.tool-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentTool = btn.getAttribute('data-type');
+      });
+    });
+
+    const drawCanvas = document.getElementById('drawingCanvas');
+    const ctx = drawCanvas.getContext('2d');
+    const clearBtn = document.getElementById('clearBtn');
+    const convertBtn = document.getElementById('convertBtn');
+    const infoText = document.getElementById('info');
+
+    let isDrawing = false;
+    let currentPath = [];
+    let allPaths = [];   
+    let allJoints = [];  
+    
+    let mousePos = { x: -100, y: -100 };
+    let hoverPoint = null;
+    let isMouseInside = false;
+
+    function getCanvasCoords(e) {
+      const rect = drawCanvas.getBoundingClientRect();
+      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    }
+
+    // Výpočet 4 rohových kotevních bodů (2 pro každý konec kosti)
+    function getBoneAnchorPoints(p1, p2) {
+      const dx = p2.x - p1.x;
+      const dy = p2.y - p1.y;
+      const len = Math.hypot(dx, dy);
+
+      if (len === 0) return [p1, p1, p2, p2];
+
+      // Normálový vektor kolmý na čáru kosti
+      const nx = -dy / len * (BONE_THICKNESS / 2);
+      const ny = dx / len * (BONE_THICKNESS / 2);
+
+      return [
+        { x: p1.x + nx, y: p1.y + ny }, // Strana A - Začátek
+        { x: p1.x - nx, y: p1.y - ny }, // Strana B - Začátek
+        { x: p2.x + nx, y: p2.y + ny }, // Strana A - Konec
+        { x: p2.x - nx, y: p2.y - ny }  // Strana B - Konec
+      ];
+    }
+
+    function getSnappedPoint(point) {
+      let closestPt = { ...point };
+      let minDist = SNAP_RADIUS;
+
+      allPaths.forEach(pathData => {
+        const p1 = pathData.points[0];
+        const p2 = pathData.points[1];
+        
+        // Získání rohových kotevních bodů kosti
+        const anchors = getBoneAnchorPoints(p1, p2);
+
+        anchors.forEach(ap => {
+          const d = Math.hypot(point.x - ap.x, point.y - ap.y);
+          if (d < minDist) {
+            minDist = d;
+            closestPt = { x: ap.x, y: ap.y };
+          }
+        });
+
+        // Test přichycení k okrajovým hranám kosti
+        const projA = getClosestPointOnSegment(point, anchors[0], anchors[2]);
+        const dProjA = Math.hypot(point.x - projA.x, point.y - projA.y);
+        if (dProjA < minDist) {
+          minDist = dProjA;
+          closestPt = projA;
+        }
+
+        const projB = getClosestPointOnSegment(point, anchors[1], anchors[3]);
+        const dProjB = Math.hypot(point.x - projB.x, point.y - projB.y);
+        if (dProjB < minDist) {
+          minDist = dProjB;
+          closestPt = projB;
+        }
+      });
+
+      return closestPt;
+    }
+
+    drawCanvas.addEventListener('mouseenter', () => { isMouseInside = true; });
+    
+    drawCanvas.addEventListener('mouseleave', () => {
+      isMouseInside = false;
+      hoverPoint = null;
+      redraw();
+    });
+
+    drawCanvas.addEventListener('mousedown', (e) => {
+      const rawPoint = getCanvasCoords(e);
+      const snappedPoint = getSnappedPoint(rawPoint);
+
+      if (currentTool === 'jointFree' || currentTool === 'jointMotor') {
+        allJoints.push({
+          x: snappedPoint.x,
+          y: snappedPoint.y,
+          isMotor: currentTool === 'jointMotor'
+        });
+        redraw();
+        return;
+      }
+
+      isDrawing = true;
+      currentPath = [snappedPoint, snappedPoint];
+      allPaths.push({ type: currentTool, points: currentPath });
+      redraw();
+    });
+
+    drawCanvas.addEventListener('mousemove', (e) => {
+      mousePos = getCanvasCoords(e);
+      const snappedPoint = getSnappedPoint(mousePos);
+
+      if (isDrawing) {
+        currentPath[1] = snappedPoint;
+      } else if (currentTool === 'jointFree' || currentTool === 'jointMotor') {
+        hoverPoint = snappedPoint;
+      } else {
+        hoverPoint = null;
+      }
+      redraw();
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (isDrawing) {
+        isDrawing = false;
+        const p1 = currentPath[0];
+        const p2 = currentPath[1];
+        if (Math.hypot(p2.x - p1.x, p2.y - p1.y) < 10) {
+          allPaths.pop();
+        }
+        redraw();
+      }
+    });
+
+    function redraw() {
+      ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+
+      // 1. Nakreslené kosti
+      allPaths.forEach(pathData => {
+        const path = pathData.points;
+        if (path.length < 2) return;
+
+        ctx.strokeStyle = COLOR_MAP[pathData.type] || '#60a5fa';
+        ctx.lineWidth = BONE_THICKNESS;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(path[0].x, path[0].y);
+        ctx.lineTo(path[1].x, path[1].y);
+        ctx.stroke();
+
+        // Vykreslení kotevních bodů (2 body na každé straně)
+        const anchors = getBoneAnchorPoints(path[0], path[1]);
+        anchors.forEach(ap => {
+          ctx.beginPath();
+          ctx.arc(ap.x, ap.y, 3, 0, Math.PI * 2);
+          ctx.fillStyle = '#ffffff';
+          ctx.fill();
+        });
+      });
+
+      // 2. Klouby
+      allJoints.forEach(j => {
+        ctx.beginPath();
+        ctx.arc(j.x, j.y, 7, 0, Math.PI * 2);
+        ctx.fillStyle = j.isMotor ? '#f59e0b' : '#ef4444';
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      });
+
+      // 3. Náhled kloubu při vznášení
+      if (hoverPoint && !isDrawing) {
+        ctx.beginPath();
+        ctx.arc(hoverPoint.x, hoverPoint.y, 8, 0, Math.PI * 2);
+        ctx.fillStyle = currentTool === 'jointMotor' ? 'rgba(245, 158, 11, 0.7)' : 'rgba(239, 68, 68, 0.7)';
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      // 4. Vlastní kurzor
+      if (isMouseInside) {
+        const toolColor = COLOR_MAP[currentTool] || '#ffffff';
+        ctx.beginPath();
+        ctx.arc(mousePos.x, mousePos.y, 9, 0, Math.PI * 2);
+        ctx.strokeStyle = toolColor;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(mousePos.x, mousePos.y, 3, 0, Math.PI * 2);
+        ctx.fillStyle = toolColor;
+        ctx.fill();
+      }
+    }
+
+    // --- MATTER.JS FYZIKÁLNÍ SIMULACE ---
+    const { Engine, Render, Runner, Bodies, Composite, Constraint } = Matter;
+
+    let engine, render, runner;
+    let physicsBodies = [];
+    let physicsConstraints = [];
+
+    function initPhysics() {
+      engine = Engine.create();
+      
+      render = Render.create({
+        element: document.getElementById('matterContainer'),
+        engine: engine,
+        options: {
+          width: 800,
+          height: 500,
+          wireframes: false,
+          background: 'transparent'
+        }
+      });
+
+      Render.run(render);
+      runner = Runner.create();
+      Runner.run(runner, engine);
+
+      const ground = Bodies.rectangle(400, 480, 800, 40, { 
+        isStatic: true,
+        render: { fillStyle: '#374151' }
+      });
+      Composite.add(engine.world, ground);
+    }
+
+    function convertToPhysics() {
+      if (allPaths.length === 0) {
+        alert('Nejprve nakresli alespoň jednu kost!');
+        return;
+      }
+
+      drawCanvas.style.pointerEvents = 'none';
+      ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+
+      const segments = [];
+
+      // 1. Tvorba těles
+      allPaths.forEach((pathData) => {
+        const p1 = pathData.points[0];
+        const p2 = pathData.points[1];
+
+        const dx = p2.x - p1.x;
+        const dy = p2.y - p1.y;
+        const length = Math.hypot(dx, dy);
+        const angle = Math.atan2(dy, dx);
+        const midX = (p1.x + p2.x) / 2;
+        const midY = (p1.y + p2.y) / 2;
+
+        const body = Bodies.rectangle(midX, midY, length, BONE_THICKNESS, {
+          angle: angle,
+          friction: 0.9,
+          restitution: 0.05,
+          collisionFilter: {
+            group: -1 // Záporná skupina: díly panáčka se mezi sebou nesráží
+          },
+          render: { fillStyle: COLOR_MAP[pathData.type] }
+        });
+
+        body.p1 = p1;
+        body.p2 = p2;
+
+        segments.push(body);
+        physicsBodies.push(body);
+      });
+
+      // 2. Vytvoření pevných kloubních spojů
+      allJoints.forEach(joint => {
+        const nearbyBodies = [];
+
+        segments.forEach(body => {
+          // Získání 4 rohových kotevních bodů kosti
+          const anchors = getBoneAnchorPoints(body.p1, body.p2);
+
+          // Kontrola vzdálenosti ke všem 4 rohovým bodům
+          let minDist = Infinity;
+          anchors.forEach(anchor => {
+            const dist = Math.hypot(joint.x - anchor.x, joint.y - anchor.y);
+            if (dist < minDist) {
+              minDist = dist;
+            }
+          });
+
+          if (minDist < 20) {
+            nearbyBodies.push(body);
+          }
+        });
+
+        if (nearbyBodies.length >= 2) {
+          // Vytvořit constrainty mezi všemi páry těles v blízkosti kloubu
+          for (let i = 0; i < nearbyBodies.length; i++) {
+            for (let j = i + 1; j < nearbyBodies.length; j++) {
+              const bodyA = nearbyBodies[i];
+              const bodyB = nearbyBodies[j];
+
+              // Převést globální pozici kloubu na lokální body pro obě tělesa
+              const localPointA = getLocalPoint(bodyA, joint);
+              const localPointB = getLocalPoint(bodyB, joint);
+
+              const constraint = Constraint.create({
+                bodyA: bodyA,
+                pointA: localPointA,
+                bodyB: bodyB,
+                pointB: localPointB,
+                stiffness: 0.8,
+                damping: 0.5,
+                length: 0,
+                render: {
+                  strokeStyle: joint.isMotor ? '#f59e0b' : '#ef4444',
+                  lineWidth: 6
+                }
+              });
+
+              constraint.isMotor = joint.isMotor;
+              physicsConstraints.push(constraint);
+            }
+          }
+        }
+      });
+
+      Composite.add(engine.world, [...physicsBodies, ...physicsConstraints]);
+      infoText.innerText = `Fyzika aktivní! Vytvořeno ${physicsBodies.length} kostí a ${physicsConstraints.length} kloubů.`;
+    }
+
+    function getClosestPointOnSegment(p, a, b) {
+      const l2 = Math.hypot(b.x - a.x, b.y - a.y) ** 2;
+      if (l2 === 0) return a;
+      let t = ((p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y)) / l2;
+      t = Math.max(0, Math.min(1, t));
+      return { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y) };
+    }
+
+    function distToSegment(p, v, w) {
+      const pt = getClosestPointOnSegment(p, v, w);
+      return Math.hypot(p.x - pt.x, p.y - pt.y);
+    }
+
+    function getLocalPoint(body, point) {
+      const dx = point.x - body.position.x;
+      const dy = point.y - body.position.y;
+      const cos = Math.cos(-body.angle);
+      const sin = Math.sin(-body.angle);
+      return { x: dx * cos - dy * sin, y: dx * sin + dy * cos };
+    }
+
+    function resetWorld() {
+      if (engine) {
+        Composite.clear(engine.world, false);
+        physicsBodies = [];
+        physicsConstraints = [];
+        
+        const ground = Bodies.rectangle(400, 480, 800, 40, { 
+          isStatic: true,
+          render: { fillStyle: '#374151' }
+        });
+        Composite.add(engine.world, ground);
+      }
+
+      allPaths = [];
+      allJoints = [];
+      currentPath = [];
+      hoverPoint = null;
+      drawCanvas.style.pointerEvents = 'auto';
+      redraw();
+      infoText.innerText = 'Nakresli kosti se dvěma kotevními body na stranách, přidej klouby a otestuj převod.';
+    }
+
+    convertBtn.addEventListener('click', convertToPhysics);
+    clearBtn.addEventListener('click', resetWorld);
+
+    initPhysics();
+  </script>
+</body>
+</html>
