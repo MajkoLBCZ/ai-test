@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>2. Převodník - Oprava pozice slepených bodů</title>
+  <!-- Načtení Matter.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background-color: #1a1a1a;
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      gap: 15px;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 500;
+    }
+    #wrapper {
+      position: relative;
+      width: 800px;
+      height: 500px;
+      border: 2px solid #444;
+      border-radius: 8px;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+      background-color: #222;
+      overflow: hidden;
+    }
+    canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+    #drawingCanvas {
+      z-index: 2;
+      cursor: none;
+    }
+    #matterContainer canvas {
+      z-index: 1;
+    }
+    .controls {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    .tools {
+      display: flex;
+      gap: 6px;
+      background: #2a2a2a;
+      padding: 6px;
+      border-radius: 8px;
+      border: 1px solid #444;
+    }
+    button {
+      padding: 8px 14px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #fff;
+      background-color: #3b82f6;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    button:hover { background-color: #2563eb; }
+    button.tool-btn { background-color: #374151; color: #aaa; }
+    button.tool-btn.active { color: #fff; }
+    button.tool-btn[data-type="body"].active { background-color: #3b82f6; }
+    button.tool-btn[data-type="legL"].active { background-color: #10b981; }
+    button.tool-btn[data-type="legR"].active { background-color: #a855f7; }
+    button.tool-btn[data-type="jointFree"].active { background-color: #ef4444; }
+    button.tool-btn[data-type="jointMotor"].active { background-color: #f59e0b; }
+    button.tool-btn[data-type="eraser"].active { background-color: #6b7280; }
+
+    button.secondary { background-color: #4b5563; }
+    button.secondary:hover { background-color: #374151; }
+    #info { font-size: 0.85rem; color: #aaa; }
+  </style>
+</head>
+<body>
+
+  <h1>2. Kosti se dvěma body uchycení na každé straně</h1>
+
+  <div class="tools">
+    <button class="tool-btn active" data-type="body">Tělo / Trunk</button>
+    <button class="tool-btn" data-type="legL">2. Noha L</button>
+    <button class="tool-btn" data-type="legR">3. Noha P</button>
+    <span style="border-left: 1px solid #555; margin: 0 4px;"></span>
+    <button class="tool-btn" data-type="jointFree">🔴 Volný Kloub</button>
+    <button class="tool-btn" data-type="jointMotor">🟡 Motorický Kloub</button>
+    <span style="border-left: 1px solid #555; margin: 0 4px;"></span>
+    <button id="glueBtn" class="secondary">🔗 Lepidlo</button>
+    <span style="border-left: 1px solid #555; margin: 0 4px;"></span>
+    <button class="tool-btn" data-type="eraser">🧹 Guma</button>
+  </div>
+
+  <div id="wrapper">
+    <canvas id="drawingCanvas" width="800" height="500"></canvas>
+    <div id="matterContainer"></div>
+  </div>
+
+  <div class="controls">
+    <button id="undoBtn" class="secondary">↩ Zpět</button>
+    <button id="redoBtn" class="secondary">↪ Dopředu</button>
+    <button id="clearBtn" class="secondary">Smazat kresbu</button>
+    <button id="resetPhysicsBtn" class="secondary">Reset fyziky</button>
+    <button id="convertBtn">Start</button>
+  </div>
+
+  <p id="info">Každá kost má 2 kotevní body na každém konci (pro obě strany tloušťky kosti).</p>
+
+  <script>
+    const COLOR_MAP = {
+      body: '#3b82f6',
+      legL: '#10b981',
+      legR: '#a855f7',
+      jointFree: '#ef4444',
+      jointMotor: '#f59e0b',
+      eraser: '#6b7280'
+    };
+
+    const BONE_THICKNESS = 12;
+    const SNAP_RADIUS = 30;
+    const ERASER_RADIUS = 20;
+
+    let currentTool = 'body';
+
+    document.querySelectorAll('.tool-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentTool = btn.getAttribute('data-type');
+      });
+    });
+
+    const drawCanvas = document.getElementById('drawingCanvas');
+    const ctx = drawCanvas.getContext('2d');
+    const clearBtn = document.getElementById('clearBtn');
+    const resetPhysicsBtn = document.getElementById('resetPhysicsBtn');
+    const convertBtn = document.getElementById('convertBtn');
+    const undoBtn = document.getElementById('undoBtn');
+    const redoBtn = document.getElementById('redoBtn');
+    const glueBtn = document.getElementById('glueBtn');
+    const infoText = document.getElementById('info');
+
+    let isDrawing = false;
+    let currentPath = [];
+    let allPaths = [];
+    let allJoints = [];
+    let gluedPoints = [];
+
+    let history = [];
+    let historyIndex = -1;
+    const MAX_HISTORY = 50;  
+    
+    let mousePos = { x: -100, y: -100 };
+    let hoverPoint = null;
+    let isMouseInside = false;
+    let snappedToEndpoint = false;
+
+    function saveState() {
+      history = history.slice(0, historyIndex + 1);
+
+      history.push({
+        paths: JSON.parse(JSON.stringify(allPaths)),
+        joints: JSON.parse(JSON.stringify(allJoints)),
+        gluedPoints: JSON.parse(JSON.stringify(gluedPoints))
+      });
+
+      if (history.length > MAX_HISTORY) {
+        history.shift();
+      } else {
+        historyIndex++;
+      }
+
+      updateUndoRedoButtons();
+    }
+
+    function undo() {
+      if (historyIndex > 0) {
+        historyIndex--;
+        restoreState(history[historyIndex]);
+      }
+    }
+
+    function redo() {
+      if (historyIndex < history.length - 1) {
+        historyIndex++;
+        restoreState(history[historyIndex]);
+      }
+    }
+
+    function restoreState(state) {
+      allPaths = JSON.parse(JSON.stringify(state.paths));
+      allJoints = JSON.parse(JSON.stringify(state.joints));
+      gluedPoints = JSON.parse(JSON.stringify(state.gluedPoints || []));
+      redraw();
+      updateUndoRedoButtons();
+    }
+
+    function updateUndoRedoButtons() {
+      undoBtn.disabled = historyIndex <= 0;
+      redoBtn.disabled = historyIndex >= history.length - 1;
+      undoBtn.style.opacity = undoBtn.disabled ? '0.5' : '1';
+      redoBtn.style.opacity = redoBtn.disabled ? '0.5' : '1';
+    }
+
+    function getCanvasCoords(e) {
+      const rect = drawCanvas.getBoundingClientRect();
+      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    }
+
+    function eraseAtPoint(point) {
+      const oldJointsLength = allJoints.length;
+      allJoints = allJoints.filter(j => {
+        const dist = Math.hypot(point.x - j.x, point.y - j.y);
+        return dist > ERASER_RADIUS;
+      });
+
+      const oldPathsLength = allPaths.length;
+      allPaths = allPaths.filter(pathData => {
+        const p1 = pathData.points[0];
+        const p2 = pathData.points[1];
+        const dist = distToSegment(point, p1, p2);
+        return dist > ERASER_RADIUS;
+      });
+
+      if (allJoints.length !== oldJointsLength || allPaths.length !== oldPathsLength) {
+        saveState();
+      }
+
+      redraw();
+    }
+
+    function getSnappedPoint(point) {
+      let closestPt = { ...point };
+      let minDist = SNAP_RADIUS;
+      snappedToEndpoint = false;
+
+      allPaths.forEach(pathData => {
+        const p1 = pathData.points[0];
+        const p2 = pathData.points[1];
+
+        const d1 = Math.hypot(point.x - p1.x, point.y - p1.y);
+        if (d1 < minDist) {
+          minDist = d1;
+          closestPt = { x: p1.x, y: p1.y };
+          snappedToEndpoint = true;
+        }
+
+        const d2 = Math.hypot(point.x - p2.x, point.y - p2.y);
+        if (d2 < minDist) {
+          minDist = d2;
+          closestPt = { x: p2.x, y: p2.y };
+          snappedToEndpoint = true;
+        }
+      });
+
+      if (minDist === SNAP_RADIUS) {
+        allPaths.forEach(pathData => {
+          const p1 = pathData.points[0];
+          const p2 = pathData.points[1];
+
+          const proj = getClosestPointOnSegment(point, p1, p2);
+          const dProj = Math.hypot(point.x - proj.x, point.y - proj.y);
+          if (dProj < minDist) {
+            minDist = dProj;
+            closestPt = proj;
+          }
+        });
+      }
+
+      return closestPt;
+    }
+
+    drawCanvas.addEventListener('mouseenter', () => { isMouseInside = true; });
+    
+    drawCanvas.addEventListener('mouseleave', () => {
+      isMouseInside = false;
+      hoverPoint = null;
+      snappedToEndpoint = false;
+      redraw();
+    });
+
+    drawCanvas.addEventListener('mousedown', (e) => {
+      const rawPoint = getCanvasCoords(e);
+      const snappedPoint = getSnappedPoint(rawPoint);
+
+      if (currentTool === 'eraser') {
+        isDrawing = true;
+        eraseAtPoint(rawPoint);
+        return;
+      }
+
+      if (currentTool === 'jointFree' || currentTool === 'jointMotor') {
+        allJoints.push({
+          x: snappedPoint.x,
+          y: snappedPoint.y,
+          isMotor: currentTool === 'jointMotor'
+        });
+        saveState();
+        redraw();
+        return;
+      }
+
+      isDrawing = true;
+      currentPath = [snappedPoint, snappedPoint];
+      allPaths.push({ type: currentTool, points: currentPath });
+      redraw();
+    });
+
+    drawCanvas.addEventListener('mousemove', (e) => {
+      mousePos = getCanvasCoords(e);
+      const snappedPoint = getSnappedPoint(mousePos);
+
+      if (isDrawing) {
+        if (currentTool === 'eraser') {
+          eraseAtPoint(mousePos);
+        } else {
+          currentPath[1] = snappedPoint;
+          hoverPoint = snappedPoint;
+        }
+      } else if (currentTool === 'jointFree' || currentTool === 'jointMotor') {
+        hoverPoint = snappedPoint;
+      } else if (currentTool === 'eraser') {
+        hoverPoint = mousePos;
+      } else {
+        hoverPoint = snappedPoint;
+      }
+      redraw();
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (isDrawing) {
+        isDrawing = false;
+
+        if (currentTool === 'eraser') return;
+
+        const p1 = currentPath[0];
+        const p2 = currentPath[1];
+        if (Math.hypot(p2.x - p1.x, p2.y - p1.y) < 10) {
+          allPaths.pop();
+        } else {
+          saveState();
+        }
+        redraw();
+      }
+    });
+
+    function redraw() {
+      ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+
+      allPaths.forEach(pathData => {
+        const path = pathData.points;
+        if (path.length < 2) return;
+
+        ctx.strokeStyle = COLOR_MAP[pathData.type] || '#60a5fa';
+        ctx.lineWidth = BONE_THICKNESS;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(path[0].x, path[0].y);
+        ctx.lineTo(path[1].x, path[1].y);
+        ctx.stroke();
+      });
+
+      allJoints.forEach(j => {
+        ctx.beginPath();
+        ctx.arc(j.x, j.y, 7, 0, Math.PI * 2);
+        ctx.fillStyle = j.isMotor ? '#f59e0b' : '#ef4444';
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      });
+
+      gluedPoints.forEach(gp => {
+        ctx.beginPath();
+        ctx.arc(gp.x, gp.y, 6, 0, Math.PI * 2);
+        ctx.fillStyle = '#00ff00';
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      });
+
+      if (hoverPoint && !isDrawing) {
+        if (currentTool === 'jointFree' || currentTool === 'jointMotor') {
+          ctx.beginPath();
+          ctx.arc(hoverPoint.x, hoverPoint.y, 8, 0, Math.PI * 2);
+          ctx.fillStyle = currentTool === 'jointMotor' ? 'rgba(245, 158, 11, 0.7)' : 'rgba(239, 68, 68, 0.7)';
+          ctx.fill();
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        } else if (currentTool === 'eraser') {
+          ctx.beginPath();
+          ctx.arc(hoverPoint.x, hoverPoint.y, ERASER_RADIUS, 0, Math.PI * 2);
+          ctx.strokeStyle = '#6b7280';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          ctx.fillStyle = 'rgba(107, 114, 128, 0.3)';
+          ctx.fill();
+        }
+      }
+
+      if (isMouseInside) {
+        const toolColor = COLOR_MAP[currentTool] || '#ffffff';
+        ctx.beginPath();
+        ctx.arc(mousePos.x, mousePos.y, 9, 0, Math.PI * 2);
+        ctx.strokeStyle = toolColor;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(mousePos.x, mousePos.y, 3, 0, Math.PI * 2);
+        ctx.fillStyle = toolColor;
+        ctx.fill();
+
+        if (snappedToEndpoint && hoverPoint) {
+          ctx.beginPath();
+          ctx.arc(hoverPoint.x, hoverPoint.y, 12, 0, Math.PI * 2);
+          ctx.strokeStyle = '#00ff00';
+          ctx.lineWidth = 3;
+          ctx.stroke();
+        }
+      }
+    }
+
+    // --- MATTER.JS FYZIKÁLNÍ SIMULACE ---
+    const { Engine, Render, Runner, Bodies, Composite, Constraint, Body } = Matter;
+
+    let engine, render, runner;
+    let physicsBodies = [];
+    let physicsConstraints = [];
+
+    function initPhysics() {
+      engine = Engine.create({
+        positionIterations: 10,
+        velocityIterations: 10
+      });
+      
+      render = Render.create({
+        element: document.getElementById('matterContainer'),
+        engine: engine,
+        options: {
+          width: 800,
+          height: 500,
+          wireframes: false,
+          background: 'transparent'
+        }
+      });
+
+      Render.run(render);
+      runner = Runner.create();
+      Runner.run(runner, engine);
+
+      const ground = Bodies.rectangle(400, 480, 800, 40, { 
+        isStatic: true,
+        friction: 0.9,
+        render: { fillStyle: '#374151' }
+      });
+      Composite.add(engine.world, ground);
+    }
+
+    // Převod globálního bodu plátna na lokální souřadnice tělesa
+    function getLocalPoint(body, point) {
+      const dx = point.x - body.position.x;
+      const dy = point.y - body.position.y;
+      const cos = Math.cos(-body.angle);
+      const sin = Math.sin(-body.angle);
+      return { x: dx * cos - dy * sin, y: dx * sin + dy * cos };
+    }
+
+    function convertToPhysics() {
+      if (allPaths.length === 0) {
+        alert('Nejprve nakresli alespoň jednu kost!');
+        return;
+      }
+
+      drawCanvas.style.pointerEvents = 'none';
+      ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+
+      const segments = [];
+
+      allPaths.forEach((pathData) => {
+        const p1 = pathData.points[0];
+        const p2 = pathData.points[1];
+
+        const dx = p2.x - p1.x;
+        const dy = p2.y - p1.y;
+        const length = Math.hypot(dx, dy);
+        const angle = Math.atan2(dy, dx);
+        const midX = (p1.x + p2.x) / 2;
+        const midY = (p1.y + p2.y) / 2;
+
+        const body = Bodies.rectangle(midX, midY, length, BONE_THICKNESS, {
+          friction: 0.8,
+          restitution: 0.0,
+          density: 0.005,
+          collisionFilter: {
+            group: -1
+          },
+          render: { fillStyle: COLOR_MAP[pathData.type] }
+        });
+
+        Body.setAngle(body, angle);
+        Body.setPosition(body, { x: midX, y: midY });
+
+        body.p1 = p1;
+        body.p2 = p2;
+
+        segments.push(body);
+        physicsBodies.push(body);
+      });
+
+      Composite.add(engine.world, segments);
+
+      // Funkce pro spojení těles v přesném světovém bodě
+      const createJointConstraint = (jointPt, isMotor = false, isGlue = false) => {
+        const nearbyBodies = [];
+
+        segments.forEach(body => {
+          const dist1 = Math.hypot(jointPt.x - body.p1.x, jointPt.y - body.p1.y);
+          const dist2 = Math.hypot(jointPt.x - body.p2.x, jointPt.y - body.p2.y);
+
+          if (dist1 < 25 || dist2 < 25) {
+            nearbyBodies.push(body);
+          }
+        });
+
+        if (nearbyBodies.length >= 2) {
+          for (let i = 0; i < nearbyBodies.length; i++) {
+            for (let j = i + 1; j < nearbyBodies.length; j++) {
+              const bodyA = nearbyBodies[i];
+              const bodyB = nearbyBodies[j];
+
+              // Výpočet lokálního offsetu přímo z cílového bodu
+              const localA = getLocalPoint(bodyA, jointPt);
+              const localB = getLocalPoint(bodyB, jointPt);
+
+              const constraint = Constraint.create({
+                bodyA: bodyA,
+                bodyB: bodyB,
+                pointA: localA,
+                pointB: localB,
+                stiffness: 0.9,
+                damping: 0.1,
+                length: 0,
+                render: {
+                  strokeStyle: isGlue ? '#00ff00' : (isMotor ? '#f59e0b' : '#ef4444'),
+                  lineWidth: isGlue ? 4 : 6
+                }
+              });
+
+              constraint.isMotor = isMotor;
+              physicsConstraints.push(constraint);
+            }
+          }
+        }
+      };
+
+      allJoints.forEach(joint => {
+        createJointConstraint(joint, joint.isMotor, false);
+      });
+
+      gluedPoints.forEach(gluePt => {
+        createJointConstraint(gluePt, false, true);
+      });
+
+      Composite.add(engine.world, physicsConstraints);
+      infoText.innerText = `Fyzika aktivní! Vytvořeno ${physicsBodies.length} kostí a ${physicsConstraints.length} spojů/kloubů.`;
+    }
+
+    function getClosestPointOnSegment(p, a, b) {
+      const l2 = Math.hypot(b.x - a.x, b.y - a.y) ** 2;
+      if (l2 === 0) return a;
+      let t = ((p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y)) / l2;
+      t = Math.max(0, Math.min(1, t));
+      return { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y) };
+    }
+
+    function distToSegment(p, v, w) {
+      const pt = getClosestPointOnSegment(p, v, w);
+      return Math.hypot(p.x - pt.x, p.y - pt.y);
+    }
+
+    function resetPhysics() {
+      if (engine) {
+        Composite.clear(engine.world, false);
+        physicsBodies = [];
+        physicsConstraints = [];
+
+        const ground = Bodies.rectangle(400, 480, 800, 40, {
+          isStatic: true,
+          friction: 0.9,
+          render: { fillStyle: '#374151' }
+        });
+        Composite.add(engine.world, ground);
+      }
+
+      drawCanvas.style.pointerEvents = 'auto';
+      redraw();
+      infoText.innerText = 'Fyzika resetována. Kresba zachována.';
+    }
+
+    function clearDrawing() {
+      if (engine) {
+        Composite.clear(engine.world, false);
+        physicsBodies = [];
+        physicsConstraints = [];
+
+        const ground = Bodies.rectangle(400, 480, 800, 40, {
+          isStatic: true,
+          friction: 0.9,
+          render: { fillStyle: '#374151' }
+        });
+        Composite.add(engine.world, ground);
+      }
+
+      allPaths = [];
+      allJoints = [];
+      gluedPoints = [];
+      currentPath = [];
+      hoverPoint = null;
+      drawCanvas.style.pointerEvents = 'auto';
+      redraw();
+      saveState();
+      infoText.innerText = 'Kresba smazána. Nakresli nové kosti.';
+    }
+
+    function applyGlue() {
+      const GLUE_THRESHOLD = 20;
+      const endpoints = [];
+
+      allPaths.forEach((path, pathIndex) => {
+        const p1 = path.points[0];
+        const p2 = path.points[1];
+        endpoints.push({ x: p1.x, y: p1.y, pathIndex, endpoint: 'p1' });
+        endpoints.push({ x: p2.x, y: p2.y, pathIndex, endpoint: 'p2' });
+      });
+
+      const clusters = [];
+      const used = new Set();
+
+      endpoints.forEach((ep, i) => {
+        if (used.has(i)) return;
+
+        const cluster = [ep];
+        used.add(i);
+
+        endpoints.forEach((other, j) => {
+          if (used.has(j)) return;
+          const dist = Math.hypot(ep.x - other.x, ep.y - other.y);
+          if (dist < GLUE_THRESHOLD) {
+            cluster.push(other);
+            used.add(j);
+          }
+        });
+
+        if (cluster.length > 1) {
+          clusters.push(cluster);
+        }
+      });
+
+      clusters.forEach(cluster => {
+        const targetX = cluster[0].x;
+        const targetY = cluster[0].y;
+
+        cluster.forEach(cp => {
+          const path = allPaths[cp.pathIndex];
+          if (cp.endpoint === 'p1') {
+            path.points[0].x = targetX;
+            path.points[0].y = targetY;
+          } else {
+            path.points[1].x = targetX;
+            path.points[1].y = targetY;
+          }
+        });
+
+        gluedPoints.push({ x: targetX, y: targetY });
+      });
+
+      redraw();
+      saveState();
+      infoText.innerText = `Lepidlo aplikováno! Slepeno ${clusters.length} bodů.`;
+    }
+
+    convertBtn.addEventListener('click', convertToPhysics);
+    clearBtn.addEventListener('click', clearDrawing);
+    resetPhysicsBtn.addEventListener('click', resetPhysics);
+    undoBtn.addEventListener('click', undo);
+    redoBtn.addEventListener('click', redo);
+    glueBtn.addEventListener('click', applyGlue);
+
+    initPhysics();
+    saveState();
+    updateUndoRedoButtons();
+  </script>
+</body>
+</html>
